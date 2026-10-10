@@ -1,0 +1,27 @@
+# The working configuration of this installation. EDIT IT — this file is yours.
+#
+# It ships tracked and minimal on purpose: the tool has to answer something on
+# the first run, before anyone has described their environments. With nothing but
+# the two settings below `bin/xref code` already parses the tree and
+# `bin/xref audit` already reports what it knows and what it does not.
+#
+# Everything else — live schema sources, production logs, the live data, the
+# habits of your tree, architectural rules — is documented with its reasons in
+# config/xref.example.yml. Copy the sections you need from there.
+
+# WHERE THE INDEX ITSELF LIVES: a separate database on the local PostgreSQL.
+#
+#   createdb xref
+#
+store_url: <%= ENV.fetch('XREF_DATABASE_URL', 'postgresql:///xref') %>
+
+# WHICH TREE IS INDEXED. Uncomment when the tool is installed next to the
+# project rather than inside it. The tree is READ-ONLY for the tool.
+#
+# project_root: ../my-application
+
+# A source is needed for the questions about schemas ("where does this column
+# live", "which environment is missing this table"). Without any source the index
+# still answers about the code — and says that the schema side is unmeasured
+# rather than empty.
+sources: {}

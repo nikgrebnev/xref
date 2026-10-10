@@ -1,0 +1,15 @@
+# The tool's own bundle and its lock: a lock in a repository meant to be
+# vendored into other projects causes more conflicts than it prevents.
+/.bundle/
+/vendor/bundle/
+Gemfile.lock
+
+# config/xref.yml is TRACKED on purpose: the tool has to answer something on the
+# first run. It is yours to edit — the sections you add (your hosts, your
+# environments) stay in your checkout, and config/xref.example.yml is the
+# documented template to copy them from.
+
+# Anything a run leaves behind.
+/tmp/
+/log/
+*.log

@@ -1,0 +1,178 @@
+#!/bin/sh
+# The single entry point into the cross-reference index.
+#
+# Queries catch the code index up on changed files by themselves, so they answer
+# about the current state rather than yesterday's. XREF_NO_REFRESH=1 turns the
+# catch-up off.
+#
+#   bin/xref where big_users.g1    where a table or a column is touched
+#   bin/xref find "<pattern>"      text search plus what the index knows about
+#                                  the hits: is the file reachable from
+#                                  production, which tables it touches, who calls
+#                                  it (KIND=code|spec|document|… FIXED=1 I=1)
+#   bin/xref column recover_       where a column lives (search by part of a name)
+#   bin/xref route /letter         routes and controller files
+#   bin/xref callers <file>        who reaches this file, and from where
+#   bin/xref holes [name]          what gets interpolated into a query and where
+#                                  that text comes from
+#   bin/xref calls [method]        who calls a method and what they pass into the
+#                                  parameters that end up in a query
+#   bin/xref dead                  the unused: routes, actions, controllers,
+#                                  methods (VIS=public — the public ones too)
+#   bin/xref changed [ref]         what an edit touches: methods, callers, tables
+#   bin/xref scope "<task>"        from a task to files: entry points, a map, an
+#                                  order of reading
+#   bin/xref boundary <file>       what to read before editing this file
+#   bin/xref rules                 architectural rules and their latches
+#   bin/xref columns <table>       what is read, what is written, what is dead
+#                                  (plus the live-data measurement, if there is one)
+#   bin/xref fill <table>          an exhaustive pass over the data: column fill
+#                                  rates, defaults, the recent cohort, indexes
+#   bin/xref lineage <table.col>   where a column's value comes from
+#   bin/xref components            the component model: roles, boundaries, cycles
+#   bin/xref views                 which views are actually rendered (production logs)
+#   bin/xref sql                   which queries actually RAN: skeletons from the
+#                                  production logs, resolved table names
+#   bin/xref sql profile           the same from the database statistics
+#                                  (pg_profile): a window of weeks, not days (DAYS=30)
+#   bin/xref findings [class]      findings by class: how many are open, how many
+#                                  verified, and the share of FALSE ones
+#   bin/xref verdict <class> <subject> false|real "why" [how]
+#                                  verified against the first source — remember
+#                                  it. A false one leaves the reports until the
+#                                  next edit of the file
+#   bin/xref locale                an encoding self-check: what Ruby sees with no
+#                                  locale
+#   bin/xref audit                 an audit of the index itself: connectivity,
+#                                  noise, gaps
+#   bin/xref blind                 where the code goes to a table that is not there
+#   bin/xref drift                 schema differences between the sources
+#   bin/xref migrations            which migrations are applied in each
+#                                  environment, what is missing, where they diverged
+#   bin/xref places                the composition of services from live containers
+#   bin/xref env                   environment keys: the code reads them, the
+#                                  environment lacks them
+#   bin/xref js                    JavaScript and Stimulus: the
+#                                  template→controller→method chain, modules, the
+#                                  unreachable, assembled names
+#   bin/xref css                   styles: what is declared, what is included, and
+#                                  whether there is a rule for a class IN THIS contour
+#   bin/xref front                 the front end and the services: nginx/angie
+#                                  configuration defects, locations, the declared
+#                                  composition of services, dangerous places in scripts
+#   bin/xref docs                  documentation as a layer of the index: broken
+#                                  links, stale file names, broken code examples
+#   bin/xref texts                 texts: a key is called with no translation —
+#                                  and the other way round (NAMES only, the values
+#                                  are never read)
+#   bin/xref json                  keys inside jsonb: from the code and from the data
+#   bin/xref code                  parse the code (FULL=1 — from scratch)
+#   bin/xref refresh               the full circle: schemas, services,
+#                                  application, code
+#   bin/xref <anything else>       a task of THIS tree: the name is passed on as
+#                                  `xref:<name>` (bin/rails -T xref — what this
+#                                  tree declares beyond the engine)
+#
+set -e
+
+cd "$(dirname "$0")/.."
+
+ruby_() {
+  if command -v mise >/dev/null 2>&1; then
+    mise exec -- "$@"
+  else
+    "$@"
+  fi
+}
+
+# The application is loaded ONLY where it cannot be avoided: `xref:app` asks the
+# framework itself for facts, and `xref:schema` goes into the application's own
+# database over its connection for a source with the `activerecord` transport.
+#
+# A STANDALONE INSTALLATION HAS NO `bin/rails` AT ALL, and six commands used to
+# die on that with "couldn't exec process" — collecting logs, queries, jsonb
+# keys, services and the live data need no application whatsoever and are routed
+# through the fast entry point below. The two that genuinely need one fall back
+# to it as well: `schema` still works for every source that goes over ssh, and
+# `app` says what it needs instead of dying on a missing file.
+rails() {
+  if [ -x bin/rails ]; then
+    ruby_ bin/rails "$@"
+  else
+    echo "bin/rails нет: установка автономная, задача пойдёт без приложения" >&2
+    ruby_ bin/xref-run "$@"
+  fi
+}
+
+# Everything else is SQL against the local index database, and the application
+# is not needed there for anything. Measured before and after:
+# `bin/xref where big_users.g1` answered in 6.5 s, of which loading Rails took
+# 3.1 s and hashing every file 1.5 s with zero edits in the tree. Now it is
+# 1.6 s. That is not cosmetic: at 6.5 s the tool is only ever asked questions
+# that are obviously structural, and for everything else people reach for grep.
+fast() { ruby_ bin/xref-run "$@"; }
+
+cmd="${1:-help}"
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+  where)   fast xref:where NAME="$1" ;;
+  find)    fast xref:find NAME="$1" ;;
+  column)  fast xref:column NAME="$1" ;;
+  route)   fast xref:route NAME="$1" ;;
+  callers) fast xref:callers FILE="$1" ;;
+  holes)   fast xref:holes NAME="$1" ;;
+  calls)   fast xref:calls NAME="$1" ;;
+  dead)    fast xref:dead_routes && fast xref:dead ;;
+  changed) fast xref:changed REF="${1:-HEAD}" ;;
+  scope)   fast xref:scope NAME="$1" ;;
+  boundary) fast xref:boundary FILE="$1" ;;
+  rules)   fast xref:rules ;;
+  columns) fast xref:columns TABLE="$1" ;;
+  fill)    fast xref:fill TABLE="$1" ;;
+  lineage) fast xref:lineage NAME="$1" ;;
+  components) fast xref:components ;;
+  views)   fast xref:views ;;
+  sql)
+    if [ "$1" = "profile" ]; then shift; fast xref:sql_profile DAYS="${1:-30}";
+    else fast xref:sql DATE="${1:-}"; fi ;;
+  findings) fast xref:findings KIND="$1" ;;
+  verdict) fast xref:verdict KIND="$1" SUBJECT="$2" VERDICT="$3" WHY="$4" HOW="$5" ;;
+  locale)  fast xref:locale NAME="$1" ;;
+  audit)   fast xref:audit ;;
+  blind)   fast xref:blind ;;
+  drift)   fast xref:drift ;;
+  migrations) fast xref:migrations ;;
+  places)  fast xref:places ;;
+  env)     fast xref:env ;;
+  texts)   fast xref:texts ;;
+  docs)    fast xref:docs ;;
+  front)   fast xref:front ;;
+  js)      fast xref:js ;;
+  css)     fast xref:css ;;
+  json)    fast xref:json ;;
+  code)    fast xref:code ;;
+  app)     rails xref:app ;;
+  schema)  rails xref:schema ;;
+  refresh) rails xref:schema && fast xref:places && rails xref:app && fast xref:code && fast xref:json ;;
+  help|--help|-h)
+    sed -n '2,/^set -e/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    # A TREE ADDS ITS OWN REPORTS WITHOUT EDITING THIS FILE. Anything not listed
+    # above is passed on as a rake task of the same name: `bin/xref contour`
+    # runs `xref:contour` if the tree declares one, and says so if it does not.
+    # Until this branch existed, the wrapper was a closed list — and a project
+    # with a report of its own had to patch the engine to reach it, which is
+    # exactly what makes a shared tool unshareable.
+    if [ -z "$cmd" ]; then
+      echo "bin/xref help — что умеет" >&2
+      exit 1
+    fi
+    rails "xref:$cmd" "$@" || {
+      echo "неизвестная команда: $cmd (задачи xref:$cmd в дереве нет)" >&2
+      echo "bin/xref help — что умеет; bin/rails -T xref — что есть в этом дереве" >&2
+      exit 1
+    }
+    ;;
+esac

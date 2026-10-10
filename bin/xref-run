@@ -1,0 +1,104 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Running the index tasks WITHOUT loading the application.
+#
+# The reason is latency, and it decided everything. Measured:
+# `bin/xref where big_users.g1` answered in 6.5 s, of which loading Rails took
+# 3.1 s, the index catch-up about 3.4 s, and THE QUERY itself against the index
+# database 0.04 s. That is, the index is two hundred times faster than grep
+# while the wrapper around it is seven hundred times slower. At such a latency
+# the tool is only ever asked questions that are obviously structural, and for
+# everything else people reach for grep — that is, the tool goes unused.
+#
+# The application is not needed here for anything: the reports are SQL against
+# a local database. All that is required is ActiveRecord itself (for the pool
+# and the quoting), `pg`, and two handfuls of core extensions the code uses.
+#
+# TWO tasks cannot work without the application and stay with `bin/rails`:
+# `xref:app` asks the framework itself for facts (routes, models, autoloading),
+# and `xref:schema` for sources with the `activerecord` transport goes into the
+# application's database over its own connection. `bin/xref` tells them apart.
+#
+# `Rails.root` was removed from the tasks in favour of `Xref.root` (which falls
+# back to `Dir.pwd` when Rails is not loaded) — otherwise half the reports would
+# not work here.
+
+# THE ENCODING COMES FIRST, BEFORE ANYTHING ELSE.
+#
+# An application sets `Encoding.default_external = UTF-8` in
+# config/environment.rb, and here Rails is not loaded — so the setting is absent
+# too. Without `LANG` (a non-interactive shell, cron, a script) the external
+# encoding is US-ASCII, and the first non-Latin letter out of an external
+# command's output, out of ENV or out of a file brings down
+# `split`/`match?`/`format`. THE WHOLE command dies: on 2026-10-09
+# `bin/xref find` with a non-Latin pattern and `bin/xref calls` (the output of
+# `git grep`) silently did not work for anyone calling them from outside a
+# terminal.
+#
+# The `default_external` setting alone IS NOT ENOUGH, and that cost a separate
+# check: **ENV and ARGV are tagged with the LOCALE's encoding rather than with
+# the default**, and the locale does not change after the process starts. If the
+# bytes do not fit it, Ruby tags the string BINARY — and `format` with non-Latin
+# text next to it dies on that instead. So with a non-UTF-8 locale we re-exec
+# with `C.UTF-8`: then ENV, ARGV and the output of any external command become
+# UTF-8 at once. The price is one extra start (0.4 s) and only where the locale
+# is missing; with a normal locale the branch does not run at all.
+# What guards against an endless re-exec is A CHECK OF WHAT WE MEANT TO DO
+# rather than a "already fixed" marker. A marker in an environment variable is a
+# hole: let it leak into the environment with a broken locale and the crash
+# comes back exactly as it was (proven by removal). This way the second pass
+# simply sees that `LC_ALL` is already ours and moves on — even if the system
+# has no `C.UTF-8`.
+if Encoding.find('locale') != Encoding::UTF_8 && ENV['LC_ALL'] != 'C.UTF-8'
+  # `LC_ALL` outranks `LANG`, so both are set: otherwise somebody else's
+  # `LC_ALL=C` overrides the fix.
+  ENV['LANG'] = 'C.UTF-8'
+  ENV['LC_ALL'] = 'C.UTF-8'
+  exec(RbConfig.ruby, __FILE__, *ARGV)
+end
+
+Encoding.default_external = Encoding::UTF_8
+Encoding.default_internal = nil
+
+require 'bundler/setup'
+require 'rake'
+require 'active_record'
+# A full `active_support/all` costs 0.5 s — half of the entire saving. We take
+# exactly what we use: `blank?`/`presence` come with active_record itself, while
+# `squish` and `deep_symbolize_keys` do not.
+require 'active_support/core_ext/string/filters'
+require 'active_support/core_ext/hash/keys'
+require 'pg'
+
+root = File.expand_path('..', __dir__)
+Dir.chdir(root)
+$LOAD_PATH.unshift File.join(root, 'lib')
+
+require 'xref'
+# The order does not matter: there are no cycles inside the library, and the
+# autoloader does not take part here.
+Dir[File.join(root, 'lib/xref/*.rb')].sort.each { |file| require file }
+
+# The tasks are declared as `task … : :environment`. Here the environment is a
+# stub: everything they need is already loaded.
+Rake::Task.define_task(:environment)
+load File.join(root, 'lib/tasks/xref.rake')
+
+name = ARGV.shift or abort 'bin/xref-run xref:<задача> [КЛЮЧ=значение …]'
+# The arguments are RE-TAGGED separately: the ARGV strings were created before
+# the line above, with the previous encoding, and changing the default no longer
+# touches them. Through ENV they travel into the tasks, and from there straight
+# into `format` next to non-Latin text — that is how `bin/xref find "<pattern>"`
+# kept dying even after the output of the search itself was fixed.
+ARGV.each do |argument|
+  key, value = Xref.utf8(argument).split('=', 2)
+  ENV[key] = value.to_s if value
+end
+
+begin
+  Rake::Task[name].invoke
+rescue Xref::Error => e
+  warn "xref: #{e.message}"
+  exit 1
+end

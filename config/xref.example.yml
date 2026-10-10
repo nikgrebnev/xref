@@ -1,0 +1,218 @@
+# The one source of truth for the index: where it stores itself, which tree it
+# indexes, which environments it asks, and the habits of that tree.
+#
+# Copy to config/xref.yml and edit. Everything except `store_url` is optional:
+# with nothing but a store URL and a project root the tool already parses the
+# tree and answers about the code. Every other section adds a source of
+# evidence.
+#
+#   cp config/xref.example.yml config/xref.yml
+#   createdb xref
+#   bin/xref code && bin/xref audit
+#
+# ERB is available here, and that is how a secret stays out of the file: read it
+# from the environment rather than writing it down.
+
+# WHERE THE INDEX ITSELF LIVES. A separate database on a local PostgreSQL. It
+# never touches the databases of the project being indexed.
+store_url: <%= ENV.fetch('XREF_DATABASE_URL', 'postgresql:///xref') %>
+
+# WHICH TREE IS INDEXED. Omit it when the tool is vendored inside the project
+# (then the project root is the tool's own directory, or Rails.root if the
+# application is loaded). Set it when the tool is installed separately:
+#
+#   project_root: ../my-application
+#
+# The tree is READ-ONLY for the tool: it never writes a file there and never
+# commits anything. All it needs is the directory and `git ls-files`.
+# project_root: ../my-application
+
+# THE HABITS OF THIS TREE — the part every project has its own version of.
+#
+# These lists are not a matter of taste, they are knowledge about one tree. Baked
+# into a parser they make a tool unportable: in a second project a parse that
+# counted by somebody else's habits produced a report that stated an untruth
+# with a straight face.
+#
+# The defaults live in the code (Xref::IDIOM_DEFAULTS), so the tool works with
+# no habits configured at all. Any list given here REPLACES the default entirely.
+# Editing this section is editing the inputs of the parse: the index re-walks the
+# tree.
+idioms:
+  # What gives away a variable holding a result row — by the source of its value.
+  row_source: [select_all, select_one, select_rows, select_values, find_by_sql]
+  # …and by its name. In a tree of any age a result row has a conventional name,
+  # and that convention is worth writing down: without it every `row[field]`
+  # read is indistinguishable from an array access.
+  row_names: [row, line, rec, info, entry, item]
+  # Wrappers of a columnar store whose FIRST argument is the table. An explicit
+  # list only: by a name prefix a wrapper whose first argument was a mail folder
+  # created three tables that do not exist.
+  table_first: []
+  # Words that stand after `from`/`update` and are not tables.
+  guess_stoplist: [set, now, lateral, values, select, where, group, order, limit,
+                   offset, generate_series, unnest, jsonb_array_elements,
+                   jsonb_each, regexp_split_to_table, string_to_table]
+  # Where the translations live. Their keys are collected separately rather than
+  # as configuration keys — there are thousands of them per file.
+  locale_dirs: [config/locales]
+  # Non-ASCII inside a string that looks like a query means PROSE: "Select a
+  # valid review status" is a button caption rather than SQL. In a project
+  # written entirely in English this has to be switched off — it will never fire
+  # once and only misleads.
+  prose_is_non_ascii: true
+  # Environment variables of the platform rather than of the project: they must
+  # not be reported as "the code reads a key the environment does not define".
+  standard_env: [PATH, HOME, PWD, SHELL, TERM, USER, LANG, LC_ALL, TZ, TMPDIR,
+                 RAILS_ENV, RACK_ENV, BUNDLE_GEMFILE, GEM_HOME, RUBYOPT]
+
+# SCHEMA SOURCES. The schema is taken from each source SEPARATELY and stored per
+# source: "the schema" in the singular is a fiction. Two production databases of
+# one application drifted apart by hundreds of tables, and from the code that is
+# invisible.
+#
+# transport:
+#   activerecord  — over the application's own connection (the local database)
+#   ssh_psql      — ssh <ssh_host> docker exec -i <container> psql …
+#   structure_sql — a dump loaded into a scratch database and read like a live one
+#   thrift        — a columnar store (HBase-style)
+sources:
+  # The repository dump is a source too, and a useful one: it and the live
+  # databases start checking each other.
+  repo:
+    kind: pg
+    transport: structure_sql
+    path: db/structure.sql
+    scratch_database: xref_repo
+    comment: the schema from the repository
+
+  local:
+    kind: pg
+    transport: activerecord
+    comment: the development database
+
+  # A production database. There is usually no direct route to one: the container
+  # publishes a different port and there is no way to 5432 from a developer
+  # machine. Do not invent a tunnel — go over ssh and run the database client
+  # inside the container.
+  #
+  # `container` is a PATTERN rather than an exact name: under an orchestrator the
+  # name carries a task suffix and changes on every restart. It is resolved on
+  # the far side.
+  prod-a:
+    kind: pg
+    transport: ssh_psql
+    ssh_host: node1
+    container: '^pg_primary'
+    user: postgres
+    database: app_production
+    comment: production, first data centre
+
+# WHICH TABLES TO MEASURE IN THE LIVE DATA, and where. This is an exhaustive
+# read of a production table, so there is deliberately no default source name:
+# "nobody said which, so let us go to the first one at hand" will one day read
+# the wrong database.
+fill:
+  sources: prod-a
+
+# ENVIRONMENT KEYS DECLARED BY A FILE rather than by a live container. A project
+# that has no ssh to anything still declares its settings somewhere — and that
+# declaration answers the question "is this key known" just as a container's
+# environment does. The key of the map is the name the report prints; the value
+# is a path in the indexed tree.
+#
+# Only NAMES are read, here as everywhere: everything to the right of the first
+# `=` is dropped before anything is remembered.
+env_declared:
+  example: .env.example
+
+# Sampling the keys inside schemaless (jsonb) columns. A jsonb column has no
+# schema — only what was actually written into it — so the keys are sampled from
+# the data rather than derived.
+json_sampling:
+  sources: [prod-a]
+  rows: 5000
+  statement_timeout: 20s
+  # A semi-production environment, if there is one: a key met ONLY there is a
+  # trace of experiments rather than a production fact. The name lives here
+  # rather than in a report — a hard-coded name goes on printing after the
+  # environment is renamed.
+  # semi_production: staging
+
+# Queries that actually RAN, out of the database's own statistics (pg_profile).
+# A second source of the same knowledge the production logs give, better in one
+# decisive respect: the WINDOW. A log lives for days; the statistics keep
+# snapshots as history, so a weekly cron shows up there and in a log it does not.
+#
+# Nothing has to be switched on in production for this: either the statistics are
+# already collected, or this section stays commented out and the logs are used.
+# sql_profile:
+#   prod-a:
+#     database: profile        # the database pg_profile itself lives in
+#     server_name: local       # the server name inside pg_profile
+#     app_database: app_production
+#     user: postgres
+
+# PRODUCTION LOGS: which actions ran and which templates were actually rendered.
+# DATE is substituted with the date. The logs are parsed ON THE NODE — only a
+# summary travels back.
+# view_logs:
+#   places:
+#     prod-a:
+#       glob: '/var/log/app/DATE-production-*.log'
+#       hosts: [node1, node2]
+
+# WHERE THE CODE RUNS. The composition of services is taken from the live
+# containers rather than from an inventory kept by hand: hand-kept inventories
+# lag, and this one lagged by a month. The place names match the schema source
+# names — otherwise the reports cannot be joined.
+# run_places:
+#   prod-a:
+#     ssh_host: node1
+#     container_match: '^app_runtime'
+
+# CONTRACTS DECLARED IN PROSE, and their latches.
+#
+# A rule written down in a document holds until the first careless edit and says
+# nothing when it stops holding. A latch is the file (usually a spec) that BREAKS
+# when the tree drifts away from the contract. The report checks three things:
+# the document exists, the latch exists, and the latch NAMES the subject of the
+# contract — otherwise there are files that pass while guarding nothing.
+#
+# What this check does not know: whether the latch actually fails. Running your
+# specs is not available to the index, and the report says so.
+# contracts:
+#   - name: the schema dump format is sql, schema.rb is not committed
+#     doc: 'doc/schema-contract.md'
+#     latch: 'spec/contracts/schema_format_spec.rb'
+#     token: structure.sql
+
+# ARCHITECTURAL RULES: an edge of the graph from `from` to `to` is a violation.
+# Patterns are LIKE patterns over the file path.
+#
+# `limit` is A LATCH rather than a norm: it is how many violations are tolerated
+# today. The report stays silent until the number grows and shouts on the first
+# new one. Without a latch a rule with three hundred old violations is useless —
+# people stop reading it on the first day.
+# rules:
+#   - name: models must not render views
+#     from: 'app/models/%'
+#     to: 'app/views/%'
+#     limit: 0
+#     why: a view rendered from a model cannot be tested and cannot be found
+
+# THE COMPONENT MODEL: who is who in the tree and who may depend on whom.
+# Reviewing the model comes BEFORE forbidding anything by it: the first version
+# of a layer order was inverted and declared three thousand ordinary renders to
+# be violations.
+#
+# role: api | ui | service | domain | shared | infra | test
+# `except` matters: patterns otherwise overlap, and a file lands in two
+# components at once.
+# components:
+#   - { name: controllers, role: api,     paths: ['app/controllers/%'] }
+#   - { name: views,       role: ui,      paths: ['app/views/%'] }
+#   - { name: models,      role: domain,  paths: ['app/models/%'] }
+#   - { name: library,     role: service, paths: ['lib/%'], except: ['lib/tasks/%'] }
+#   - { name: tasks,       role: service, paths: ['lib/tasks/%'] }
+#   - { name: specs,       role: test,    paths: ['spec/%'] }

@@ -1,0 +1,25 @@
+Documentation License
+
+The documentation in this repository — this file, the READMEs, the xref
+specification (doc/guide.md) and the verification note (doc/verification.md),
+together with their Russian copies — is licensed under the Creative Commons
+Attribution 4.0 International License (CC BY 4.0).
+
+Copyright (c) 2026 Nik Grebnev
+
+You are free to share and adapt this material for any purpose, including
+commercially, provided you give appropriate credit, link to the license, and
+indicate whether changes were made.
+
+Full legal text: https://creativecommons.org/licenses/by/4.0/legalcode
+Human-readable summary: https://creativecommons.org/licenses/by/4.0/
+
+EXCEPTION — code inside the documentation. Source code appearing in these
+documents (the SQL schema and views, the Ruby fragments, the shell snippets, the
+configuration examples) is licensed under the MIT License, the same terms as the
+rest of the repository; see LICENSE. You may copy it into your own project
+without the attribution requirement above. This exists so the specification can
+be used for its stated purpose: rebuilding an equivalent tool on another stack.
+
+Everything in this repository other than documentation is under the MIT License;
+see LICENSE.
